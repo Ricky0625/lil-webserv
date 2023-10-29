@@ -38,104 +38,149 @@ void verify_socketinfo(struct addrinfo *servinfo)
               << "Protocol: " << (servinfo->ai_protocol == IPPROTO_TCP ? "TCP" : (servinfo->ai_protocol == IPPROTO_UDP ? "UDP" : "Unknown")) << "\n";
 }
 
+int setupServerSocket(const char *port)
+{
+    int serverfd;
+    struct addrinfo hints;
+    struct addrinfo *servinfo;
+
+    memset(&hints, 0, sizeof(addrinfo));
+    hints.ai_family = AF_INET;       // IPv4
+    hints.ai_socktype = SOCK_STREAM; // TCP
+    hints.ai_flags = AI_PASSIVE;
+
+    // obtain the information about the local address to which the server will bind
+    if (getaddrinfo("localhost", port, &hints, &servinfo) != 0)
+    {
+        std::cerr << "getaddrinfo error: " << gai_strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+
+    // creates a socket
+    if ((serverfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol)) == -1)
+    {
+        std::cerr << "socket error: " << strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+
+    // FOR TESTING PURPOSE: to reuse socket fd
+    const int reuse = 1;
+    if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)))
+    {
+        std::cerr << "setsockopt error: " << strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+
+    // bind socket
+    if (bind(serverfd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
+    {
+        std::cerr << "bing error: " << strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+
+    // free the linked-list, no use from this point onward
+    freeaddrinfo(servinfo);
+
+    return serverfd;
+}
+
+void listenIncoming(int serverfd, const std::string &port)
+{
+    // tell a socket to listen for incoming connections
+    if (listen(serverfd, 10) == -1)
+    {
+        std::cerr << "listen error: " << strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+    std::cout << "server is listening for incoming connections on port " << port << " ..." << std::endl;
+}
+
+int acceptConnection(int serverfd)
+{
+    struct sockaddr_storage incoming_addr;
+    socklen_t addr_size = sizeof(incoming_addr);
+    int clientfd;
+
+    if ((clientfd = accept(serverfd, (struct sockaddr *)&incoming_addr, &addr_size)) == -1)
+    {
+        std::cerr << "accept error: " << strerror(errno) << std::endl;
+        std::exit(EXIT_FAILURE);
+    }
+    return clientfd;
+}
+
+int processClientRequest(int clientfd)
+{
+    // need to use other way for this. now only can handle small request
+    char buf[1024];
+    int byte_count;
+
+    byte_count = recv(clientfd, &buf, sizeof(buf), 0);
+    if (byte_count == 0)
+    {
+        std::cerr << "Client: " << clientfd << " closed connection on server!" << std::endl;
+        close(clientfd);
+        return 0;
+    }
+    else if (byte_count == -1)
+    {
+        std::cerr << "recv error: " << strerror(errno) << std::endl;
+        close(clientfd);
+        return 0;
+    }
+    // std::cout << "received this:\n"
+    //           << buf << std::endl;
+    return 1;
+}
+
 int main(int ac, char **av)
 {
 
     if (ac != 2)
     {
-        std::cerr << "./lil_webserv [port]"
-                  << "\n";
-        exit(EXIT_FAILURE);
+        std::cerr << "./lil_webserv [port]" << std::endl;
+        std::exit(EXIT_FAILURE);
     }
 
     const std::string PORT = av[1];
+    int serverfd;
 
-    // GETADDRINFO START ================
-    int status;
-    struct addrinfo hints;
-    struct addrinfo *servinfo; // will point to the results
+    serverfd = setupServerSocket(PORT.c_str());
+    listenIncoming(serverfd, PORT);
 
-    // ensure that the hints is empty
-    memset(&hints, 0, sizeof(addrinfo));
-    hints.ai_family = AF_INET; // IPv4
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
+    const int NUM_OF_FD_TO_MONITOR = 1;
+    struct pollfd pfds[1]; // we only have to monitor one port
 
-    // call getaddrinfo
-    status = getaddrinfo("localhost", PORT.c_str(), &hints, &servinfo);
-    if (status != 0)
+    pfds[0].fd = serverfd;   // monitor serverfd
+    pfds[0].events = POLLIN; // tell me when ready to read. server only needs to know when to read
+
+    while (true) // infinite loop
     {
-        std::cerr << "getaddrinfo error: " << std::strerror(errno) << "\n";
-        std::exit(EXIT_FAILURE);
+        // polling
+        int num_events = poll(pfds, NUM_OF_FD_TO_MONITOR, -1); // set to -1 means monitor until the end of the world
+
+        // no need to check if poll will return 0, since it won't timeout...
+        if (num_events == -1)
+        {
+            std::cerr << "poll error: " << strerror(errno) << std::endl;
+            break;
+        }
+
+        // check if the events we are expecting occured. in this case, we are hoping for POLLIN (ready to read)
+        int pollin_occurs = pfds[0].revents & POLLIN;
+
+        if (pollin_occurs)
+        {
+            int clientfd = acceptConnection(serverfd);
+            int status = processClientRequest(clientfd);
+            const std::string msg = "HTTP1.1 200 ok\r\n\r\nComparison is the thief of joy.\n";
+            send(clientfd, msg.c_str(), msg.size(), 0);
+            if (status)
+                close(clientfd);
+        }
+        else
+            std::cout << "Hmmm... something went wrong... Not ready yet." << std::endl;
     }
-    // ================ GETADDRINFO END
-
-    // SOCKET START ================
-    int serverfd; // a socket fd
-
-    serverfd = socket(servinfo->ai_family, servinfo->ai_socktype, servinfo->ai_protocol);
-    if (serverfd == -1)
-    {
-        std::cerr << std::strerror(errno) << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    // std::cout << "socket init done! severfd (socket): " << serverfd << std::endl;
-    // fcntl(serverfd, F_SETFL, O_NONBLOCK); // uncomment this to make socket non blocking
-    // verify_socketinfo(servinfo);
-    // ================ SOCKET END
-
-    // BIND START ================
-    const int reuse = 1;
-
-    // FOR TESTING DEV PURPOSE START ================
-    if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)))
-    {
-        std::cerr << "setsockopt error: " << std::strerror(errno) << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    // ================ FOR TESTING DEV PURPOSE END
-    if (bind(serverfd, servinfo->ai_addr, servinfo->ai_addrlen) == -1)
-    {
-        std::cerr << "bind error: " << std::strerror(errno) << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    // ================ BIND END
-
-    // free the linked-list, no use starting from this point onward
-    freeaddrinfo(servinfo);
-
-    // LISTEN START ================
-    if (listen(serverfd, 10) == -1)
-    {
-        std::cerr << "listen error: " << strerror(errno) << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    // std::cout << "listen done!" << std::endl;
-    // ================ LISTEN END
-
-    std::cout << "server is listening for incoming connections on port " << PORT << " ..."
-              << "\n";
-
-    // ACCEPT START ================
-    // this part needs to be in an infinite loop
-    struct sockaddr_storage incoming_addr;
-    socklen_t addr_size = sizeof(incoming_addr);
-    int incomingfd;
-
-    incomingfd = accept(serverfd, (struct sockaddr *)&incoming_addr, &addr_size);
-
-    char buf[1024 + 1];
-    recv(incomingfd, buf, 1024, 0);
-    std::cout << buf << std::endl;
-
-    const std::string msg = "HTTP1.1 200 ok\r\n\r\nHatsune Miku is cute";
-    send(incomingfd, msg.c_str(), msg.size(), 0);
-    // ================ ACCEPT END
-
-    // CLOSE ================
-    close(incomingfd);
     close(serverfd);
-    // ================ CLOSE END
-
     system("leaks -q lil_webserv");
 }

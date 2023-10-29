@@ -315,7 +315,3 @@ close(sockfd);
 ```
 
 This will prevent anymore reads and writes to the socket. Anyone attempting to read or write the socket on the remote end will receive an error.
-
-## I/O Multiplexing
-
-/Users/wricky-t/.docker/bin:/Users/wricky-t/goinfre/.brew/bin:/Library/Frameworks/Python.framework/Versions/3.10/bin:/Library/Frameworks/Python.framework/Versions/3.7/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/munki
